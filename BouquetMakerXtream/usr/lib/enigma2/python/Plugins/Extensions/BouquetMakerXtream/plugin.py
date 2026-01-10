@@ -9,7 +9,7 @@ import shutil
 import sys
 import time
 import twisted.python.runtime
-from datetime import datetime
+from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter, Retry
 
 try:
@@ -291,38 +291,48 @@ class BMXAutoStartTimer:
     def __init__(self, session):
         self.session = session
         self.timer = eTimer()
-        self._running_update = False  # flag to prevent overlapping updates
+        self._running_update = False  # Prevent overlapping updates
 
         try:
             self.timer_conn = self.timer.timeout.connect(self.onTimer)
         except:
             self.timer.callback.append(self.onTimer)
 
-        # Run missed update shortly after boot if setting enabled
-        if cfg.autoupdate.value and cfg.missedupdate.value:
-            print("[BMXAutoStartTimer] Scheduling missed update 20s after boot")
-            self.bootTimer = eTimer()
-            try:
-                self.bootTimer_conn = self.bootTimer.timeout.connect(self.runUpdate)
-            except:
-                self.bootTimer.callback.append(self.runUpdate)
-            self.bootTimer.startLongTimer(5)  # 20-second delay
+        now = datetime.now()
+        clock = cfg.wakeup.value
+        scheduled_today = datetime(now.year, now.month, now.day, clock[0], clock[1], 0)
 
-        # Schedule the next wake
+        # Run missed update shortly after boot if enabled and scheduled time has passed
+        if cfg.autoupdate.value and cfg.missedupdate.value:
+            if now >= scheduled_today:
+                print("[BMXAutoStartTimer] Scheduling missed update shortly after boot")
+                self.bootTimer = eTimer()
+                try:
+                    self.bootTimer_conn = self.bootTimer.timeout.connect(self.runUpdate)
+                except:
+                    self.bootTimer.callback.append(self.runUpdate)
+                self.bootTimer.startLongTimer(20)  # 20-second delay after boot
+
+        # Schedule the next daily wake
         self.update()
 
     def getWakeTime(self):
-        """Return the next scheduled wake timestamp as a Unix timestamp."""
-        if cfg.autoupdate.value:
-            clock = cfg.wakeup.value
-            now = datetime.now()
-            dt = datetime(now.year, now.month, now.day, clock[0], clock[1], 0)
-            return int(time.mktime(dt.timetuple()))
-        else:
+        """Return the next scheduled wake timestamp in the future."""
+        if not cfg.autoupdate.value:
             return -1
 
-    def update(self, atLeast=0):
-        """Schedule the next timer event."""
+        clock = cfg.wakeup.value
+        now = datetime.now()
+        dt = datetime(now.year, now.month, now.day, clock[0], clock[1], 0)
+
+        # If scheduled time has already passed, schedule for next day
+        if dt <= now:
+            dt += timedelta(days=1)
+
+        return int(time.mktime(dt.timetuple()))
+
+    def update(self):
+        """Schedule the timer for the next update."""
         self.timer.stop()
         wake = self.getWakeTime()
         nowtime = time.time()
@@ -330,32 +340,16 @@ class BMXAutoStartTimer:
         if wake > 0:
             next = wake - int(nowtime)
 
-            # If the scheduled time has already passed
-            if next <= 0:
-                if cfg.missedupdate.value:
-                    # Run update immediately
-                    print("[BMXAutoStartTimer] Scheduled time missed, running update now")
-                    self.runUpdate()
-                    wake = self.getWakeTime()  # recompute for next day
-                    next = wake - int(time.time())
-                else:
-                    # Skip missed update, schedule for tomorrow
-                    wake = self.getWakeTime() + 24 * 3600
-                    next = wake - int(time.time())
-
             # Cap maximum wait to 24 hours
             if next > 24 * 3600:
                 next = 24 * 3600
 
-            # Debug print
             wake_dt = datetime.fromtimestamp(wake)
             print("[BMXAutoStartTimer] Next wake in %d seconds at %s" %
                   (next, wake_dt.strftime("%Y-%m-%d %H:%M:%S")))
 
             self.timer.startLongTimer(next)
-
         else:
-            wake = -1
             print("[BMXAutoStartTimer] Auto update disabled")
 
         return wake
@@ -363,27 +357,18 @@ class BMXAutoStartTimer:
     def onTimer(self):
         """Callback when the timer fires."""
         self.timer.stop()
-        now = int(time.time())
-        wake = self.getWakeTime()
-        atLeast = 0
-
-        if abs(wake - now) < 60:
-            self.runUpdate()
-            atLeast = 60
-        else:
-            print("*** start update failed ***")
-
-        self.update(atLeast)
+        self.runUpdate()
+        self.update()  # Schedule next day
 
     def runUpdate(self):
-        """Run the bouquet update process safely without overlapping."""
+        """Run the bouquet update safely without overlapping."""
         if self._running_update:
             print("[BMXAutoStartTimer] Update already running, skipping...")
             return
 
         try:
             self._running_update = True
-            print("\n *********** BouquetMakerXtream runupdate ************ \n")
+            print("\n*********** BouquetMakerXtream runupdate ************\n")
             from . import update2
             self.session.open(update2.BmxUpdate, "auto")
         finally:
@@ -402,27 +387,26 @@ def myBase(self, session, forceLegacy=False):
 
 
 def autostart(reason, session=None, **kwargs):
-    # called with reason=1 to during shutdown, with reason=0 at startup?
+    """
+    Called by Enigma2 at startup (reason=0) or shutdown (reason=1).
+    Initializes the BMXAutoStartTimer on startup.
+    """
     global bmxAutoStartTimer
     global _session
 
-    now_t = time.time()
-    now = int(now_t)
-    ndt = datetime.fromtimestamp(now)
+    now = datetime.now()
+    print("[BouquetMakerXtream] autostart (%s) occurred at %s" % (reason, now))
 
-    print("[BouquetMakerXtream] autostart (%s) occured at" % reason, ndt)
+    if reason == 0 and session is not None:
+        _session = session
+        if bmxAutoStartTimer is None:
+            bmxAutoStartTimer = BMXAutoStartTimer(session)
 
-    if reason == 0 and _session is None:
-        if session is not None:
-            _session = session
-            if bmxAutoStartTimer is None:
-                bmxAutoStartTimer = BMXAutoStartTimer(session)
-
-            if cfg.catchup_on.value:
-                if ChannelSelectionBase.__init__ != BmxChannelSelectionBase__init__:
-                    ChannelSelectionBase.__init__ = myBase
+        # Replace ChannelSelectionBase.__init__ if needed
+        if cfg.catchup_on.value and ChannelSelectionBase.__init__ != BmxChannelSelectionBase__init__:
+            ChannelSelectionBase.__init__ = myBase
     else:
-        print("[BouquetMakerXtream] Stop")
+        print("[BouquetMakerXtream] Shutdown or other reason, no timer started")
 
 
 def showBmxCatchup(self):
@@ -533,24 +517,33 @@ def playOriginalChannel(self, answer=None):
 
 
 def Plugins(**kwargs):
-    iconFile = "icons/plugin-icon_sd.png"
-    if screenwidth.width() > 1280:
-        iconFile = "icons/plugin-icon.png"
+    iconFile = "icons/plugin-icon.png" if screenwidth.width() > 1280 else "icons/plugin-icon_sd.png"
     description = _("IPTV Bouquets Creator by KiddaC")
     pluginname = _("BouquetMakerXtream")
 
-    main_menu = PluginDescriptor(name=pluginname, description=description, where=PluginDescriptor.WHERE_MENU, fnc=mainmenu, needsRestart=True)
-    extensions_menu = PluginDescriptor(name=pluginname, description=description, where=PluginDescriptor.WHERE_EXTENSIONSMENU, fnc=main, needsRestart=True)
+    # Menus
+    main_menu = PluginDescriptor(
+        name=pluginname,
+        description=description,
+        where=PluginDescriptor.WHERE_MENU,
+        fnc=mainmenu,
+        needsRestart=True
+    )
+    extensions_menu = PluginDescriptor(
+        name=pluginname,
+        description=description,
+        where=PluginDescriptor.WHERE_EXTENSIONSMENU,
+        fnc=main,
+        needsRestart=True
+    )
 
+    # Plugin descriptors list
     result = [
         PluginDescriptor(
             name=pluginname,
             description=description,
-            where=[
-                PluginDescriptor.WHERE_AUTOSTART,
-                PluginDescriptor.WHERE_SESSIONSTART
-            ],
-            fnc=autostart,
+            where=[PluginDescriptor.WHERE_AUTOSTART, PluginDescriptor.WHERE_SESSIONSTART],
+            fnc=autostart
         ),
         PluginDescriptor(
             name=pluginname,
@@ -558,11 +551,11 @@ def Plugins(**kwargs):
             where=PluginDescriptor.WHERE_PLUGINMENU,
             icon=iconFile,
             fnc=main
-        ),
+        )
     ]
 
+    # Append extensions and main menu if configured
     result.append(extensions_menu)
-
     if cfg.main.value:
         result.append(main_menu)
 
