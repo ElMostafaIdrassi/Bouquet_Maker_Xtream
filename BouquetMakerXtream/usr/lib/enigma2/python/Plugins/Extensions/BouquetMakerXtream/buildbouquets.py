@@ -478,10 +478,10 @@ class BmxBuildBouquets(Screen):
         if debugs:
             print("*** loadLive ***")
 
+        self.live_stream_data = []
         if glob.current_playlist["settings"]["show_live"] and self.live_categories and self.live_streams:
 
             self.clearCaches()
-            self.live_stream_data = []
             stream_type = self.settings["live_type"]
 
             if self.settings["live_category_order"] == "alphabetical":
@@ -629,7 +629,7 @@ class BmxBuildBouquets(Screen):
 
         # Continue to next section
         if self.playlist_info["playlist_type"] == "xtream":
-            if self.live_categories and epgimporter:
+            if self.live_categories and epgimporter and self.live_stream_data:
                 self.buildXmltvSource()
             self.live_categories = []
             self.live_streams = []
@@ -657,10 +657,11 @@ class BmxBuildBouquets(Screen):
         if debugs:
             print("*** loadVod ***")
 
+        self.vod_stream_data = []
+
         if glob.current_playlist["settings"]["show_vod"] and self.vod_categories and self.vod_streams:
 
             self.clearCaches()
-            self.vod_stream_data = []
             stream_type = self.settings["vod_type"]
 
             if self.settings["vod_category_order"] == "alphabetical":
@@ -805,9 +806,10 @@ class BmxBuildBouquets(Screen):
         if debugs:
             print("*** loadSeries ***")
 
+        self.series_stream_data = []
+
         if glob.current_playlist["settings"]["show_series"] and self.series_categories and self.series_streams:
             self.clearCaches()
-            self.series_stream_data = []
             # stream_type = self.settings["vod_type"]
 
             if self.settings["vod_category_order"] == "alphabetical":
